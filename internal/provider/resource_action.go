@@ -29,6 +29,7 @@ type actionResourceModel struct {
 	ID              types.String `tfsdk:"id"`
 	Name            types.String `tfsdk:"name"`
 	UserGroupIDs    types.Set    `tfsdk:"user_group_ids"`
+	HostGroupIDs    types.Set    `tfsdk:"host_group_ids"`
 	TriggerNameLike types.Set    `tfsdk:"trigger_name_like"`
 	Subject         types.String `tfsdk:"subject"`
 	Message         types.String `tfsdk:"message"`
@@ -62,6 +63,11 @@ func (r *actionResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 				Required:            true,
 				ElementType:         types.StringType,
 				MarkdownDescription: "IDs of user groups to notify (e.g. Zabbix administrators). Use data source or variable.",
+			},
+			"host_group_ids": schema.SetAttribute{
+				Optional:            true,
+				ElementType:         types.StringType,
+				MarkdownDescription: "If set, action runs only when the trigger's host belongs to one of these host groups (e.g. Videoprojecteur Lampe, Videoprojecteur Laser).",
 			},
 			"trigger_name_like": schema.SetAttribute{
 				Optional:            true,
@@ -116,11 +122,13 @@ func (r *actionResource) Create(ctx context.Context, req resource.CreateRequest,
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	hostGroupIDs, _ := setToStringsOptional(ctx, plan.HostGroupIDs)
 	triggerNameLike, _ := setToStringsOptional(ctx, plan.TriggerNameLike)
 
 	id, err := r.client.ActionCreate(ctx, zabbix.ActionCreateRequest{
 		Name:            plan.Name.ValueString(),
 		UserGroupIDs:    groupIDs,
+		HostGroupIDs:    hostGroupIDs,
 		TriggerNameLike: triggerNameLike,
 		Subject:         plan.Subject.ValueString(),
 		Message:         plan.Message.ValueString(),
@@ -169,12 +177,30 @@ func (r *actionResource) Read(ctx context.Context, req resource.ReadRequest, res
 	}
 	state.UserGroupIDs, _ = types.SetValueFrom(ctx, types.StringType, groupIDs)
 
-	// Rebuild trigger_name_like from conditions (conditiontype 2 = trigger name)
+	// Rebuild host_group_ids and trigger_name_like from conditions (type 0 = host group, 2/3 = trigger name).
+	conds := action.Conditions
+	if action.Filter != nil && len(action.Filter.Conditions) > 0 {
+		conds = action.Filter.Conditions
+	}
+	hostGroupIDs := make([]string, 0)
 	triggerNameLike := make([]string, 0)
-	for _, c := range action.Conditions {
-		if c.ConditionType == "2" && c.Value != "" {
-			triggerNameLike = append(triggerNameLike, c.Value)
+	for _, c := range conds {
+		ct := string(c.ConditionType)
+		switch ct {
+		case "0":
+			if c.Value != "" {
+				hostGroupIDs = append(hostGroupIDs, c.Value)
+			}
+		case "2", "3":
+			if c.Value != "" {
+				triggerNameLike = append(triggerNameLike, c.Value)
+			}
 		}
+	}
+	if len(hostGroupIDs) > 0 {
+		state.HostGroupIDs, _ = types.SetValueFrom(ctx, types.StringType, hostGroupIDs)
+	} else {
+		state.HostGroupIDs = types.SetNull(types.StringType)
 	}
 	if len(triggerNameLike) > 0 {
 		state.TriggerNameLike, _ = types.SetValueFrom(ctx, types.StringType, triggerNameLike)
@@ -199,11 +225,13 @@ func (r *actionResource) Update(ctx context.Context, req resource.UpdateRequest,
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	hostGroupIDs, _ := setToStringsOptional(ctx, plan.HostGroupIDs)
 	triggerNameLike, _ := setToStringsOptional(ctx, plan.TriggerNameLike)
 
 	err := r.client.ActionUpdate(ctx, state.ID.ValueString(), zabbix.ActionCreateRequest{
 		Name:            plan.Name.ValueString(),
 		UserGroupIDs:    groupIDs,
+		HostGroupIDs:    hostGroupIDs,
 		TriggerNameLike: triggerNameLike,
 		Subject:         plan.Subject.ValueString(),
 		Message:         plan.Message.ValueString(),

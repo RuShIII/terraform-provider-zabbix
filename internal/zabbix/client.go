@@ -1092,7 +1092,31 @@ func boolToStatus(enabled bool) int {
 
 // --- Action (trigger notifications, e.g. send email) ---
 
-// Action object (trigger-based, eventsource=0).
+// flexString unmarshals JSON number or string into string (API may return conditiontype/operator as number).
+type flexString string
+
+func (s *flexString) UnmarshalJSON(data []byte) error {
+	var n int
+	if err := json.Unmarshal(data, &n); err == nil {
+		*s = flexString(strconv.Itoa(n))
+		return nil
+	}
+	var str string
+	if err := json.Unmarshal(data, &str); err != nil {
+		return err
+	}
+	*s = flexString(str)
+	return nil
+}
+
+// ActionCondition for 6.4 (top-level) or 7.x (inside filter).
+type ActionCondition struct {
+	ConditionType flexString `json:"conditiontype"`
+	Operator      flexString `json:"operator"`
+	Value         string     `json:"value"`
+}
+
+// Action object (trigger-based, eventsource=0). Zabbix 7.x returns filter.conditions, 6.4 returns conditions at root.
 type Action struct {
 	ActionID     string `json:"actionid"`
 	Name         string `json:"name"`
@@ -1102,11 +1126,12 @@ type Action struct {
 	EscPeriod    string `json:"esc_period"`
 	DefShortData string `json:"def_shortdata"`
 	DefLongData  string `json:"def_longdata"`
-	Conditions   []struct {
-		ConditionType string `json:"conditiontype"`
-		Operator      string `json:"operator"`
-		Value         string `json:"value"`
-	} `json:"conditions"`
+	Conditions   []ActionCondition `json:"conditions,omitempty"` // 6.4
+	Filter       *struct {
+		Conditions []ActionCondition `json:"conditions"`
+		EvalType   string            `json:"evaltype"`
+		Formula    string            `json:"formula"`
+	} `json:"filter,omitempty"` // 7.x
 	Operations []struct {
 		OperationType string `json:"operationtype"`
 		OpmessageGrp  []struct {
@@ -1126,39 +1151,36 @@ type ActionCreateRequest struct {
 	Message           string   // def_longdata
 	Enabled           bool
 	EscPeriod         string   // e.g. "1h", "60s"
-	TriggerNameLike   []string // optional: restrict to triggers whose name contains any of these (conditiontype 2, operator 8 like)
+	HostGroupIDs      []string // optional: restrict to hosts in these host groups (conditiontype 0)
+	TriggerNameLike   []string // optional: restrict to triggers whose name contains any of these
 }
 
 func (c *Client) ActionCreate(ctx context.Context, req ActionCreateRequest) (string, error) {
-	// Condition 1: trigger value = PROBLEM (conditiontype 5, value 1)
-	conditions := []map[string]string{
-		{"conditiontype": "5", "operator": "0", "value": "1"},
+	// API 7.x style: "filter" (not "conditions" at root). conditiontype 0 = Host group, 3 = trigger description.
+	conditions := make([]map[string]any, 0)
+	for _, gid := range req.HostGroupIDs {
+		if gid == "" {
+			continue
+		}
+		conditions = append(conditions, map[string]any{"conditiontype": 0, "operator": 0, "value": gid})
 	}
-	evaltype := "1" // AND
-	formula := ""
-	if len(req.TriggerNameLike) > 0 {
-		// Conditions 2, 3, ...: trigger name like "X" (conditiontype 2, operator 8)
-		for _, pat := range req.TriggerNameLike {
-			if pat == "" {
-				continue
-			}
-			conditions = append(conditions, map[string]string{"conditiontype": "2", "operator": "8", "value": pat})
+	for _, pat := range req.TriggerNameLike {
+		if pat == "" {
+			continue
 		}
-		// Formula: 1 and (2 or 3 or ...) so we need PROBLEM and at least one name match
-		if len(conditions) > 1 {
-			evaltype = "0"
-			parts := make([]string, 0, len(conditions)-1)
-			for i := 2; i <= len(conditions); i++ {
-				parts = append(parts, strconv.Itoa(i))
-			}
-			formula = "1 and (" + strings.Join(parts, " or ") + ")"
-		}
+		conditions = append(conditions, map[string]any{"conditiontype": 3, "operator": 2, "value": pat})
+	}
+	if len(conditions) == 0 {
+		conditions = []map[string]any{{"conditiontype": 3, "operator": 2, "value": ""}}
+	}
+	evaltype := 1   // AND: host in group AND (name like X OR name like Y)
+	if len(conditions) > 1 {
+		evaltype = 2 // OR between conditions (e.g. group Lampe OR group Laser OR trigger name)
 	}
 	opmessageGrp := make([]map[string]string, 0, len(req.UserGroupIDs))
 	for _, gid := range req.UserGroupIDs {
 		opmessageGrp = append(opmessageGrp, map[string]string{"usrgrpid": gid})
 	}
-	// Operation: send message (operationtype 0) to user groups, use default message
 	operations := []map[string]any{
 		{
 			"operationtype":  "0",
@@ -1174,20 +1196,16 @@ func (c *Client) ActionCreate(ctx context.Context, req ActionCreateRequest) (str
 	if escPeriod == "" {
 		escPeriod = "1h"
 	}
+	filter := map[string]any{"conditions": conditions, "evaltype": evaltype}
 	params := map[string]any{
-		"name":          req.Name,
-		"eventsource":   "0",
-		"evaltype":      evaltype,
-		"status":        status,
-		"esc_period":    escPeriod,
-		"def_shortdata": req.Subject,
-		"def_longdata":  req.Message,
-		"conditions":    conditions,
-		"operations":    operations,
+		"name":        req.Name,
+		"eventsource": "0",
+		"filter":      filter,
+		"status":      status,
+		"esc_period":  escPeriod,
+		"operations":  operations,
 	}
-	if formula != "" {
-		params["formula"] = formula
-	}
+	// Note: this API version rejects def_shortdata/def_longdata and opmessage subject/message; message uses media type default.
 	var result struct {
 		ActionIDs []string `json:"actionids"`
 	}
@@ -1218,26 +1236,25 @@ func (c *Client) ActionGetByID(ctx context.Context, id string) (*Action, error) 
 }
 
 func (c *Client) ActionUpdate(ctx context.Context, id string, req ActionCreateRequest) error {
-	conditions := []map[string]string{
-		{"conditiontype": "5", "operator": "0", "value": "1"},
+	conditions := make([]map[string]any, 0)
+	for _, gid := range req.HostGroupIDs {
+		if gid == "" {
+			continue
+		}
+		conditions = append(conditions, map[string]any{"conditiontype": 0, "operator": 0, "value": gid})
 	}
-	evaltype := "1"
-	formula := ""
-	if len(req.TriggerNameLike) > 0 {
-		for _, pat := range req.TriggerNameLike {
-			if pat == "" {
-				continue
-			}
-			conditions = append(conditions, map[string]string{"conditiontype": "2", "operator": "8", "value": pat})
+	for _, pat := range req.TriggerNameLike {
+		if pat == "" {
+			continue
 		}
-		if len(conditions) > 1 {
-			evaltype = "0"
-			parts := make([]string, 0, len(conditions)-1)
-			for i := 2; i <= len(conditions); i++ {
-				parts = append(parts, strconv.Itoa(i))
-			}
-			formula = "1 and (" + strings.Join(parts, " or ") + ")"
-		}
+		conditions = append(conditions, map[string]any{"conditiontype": 3, "operator": 2, "value": pat})
+	}
+	if len(conditions) == 0 {
+		conditions = []map[string]any{{"conditiontype": 3, "operator": 2, "value": ""}}
+	}
+	evaltype := 1
+	if len(conditions) > 1 {
+		evaltype = 2
 	}
 	opmessageGrp := make([]map[string]string, 0, len(req.UserGroupIDs))
 	for _, gid := range req.UserGroupIDs {
@@ -1258,19 +1275,14 @@ func (c *Client) ActionUpdate(ctx context.Context, id string, req ActionCreateRe
 	if escPeriod == "" {
 		escPeriod = "1h"
 	}
+	filter := map[string]any{"conditions": conditions, "evaltype": evaltype}
 	params := map[string]any{
-		"actionid":       id,
-		"name":           req.Name,
-		"evaltype":       evaltype,
-		"status":         status,
-		"esc_period":     escPeriod,
-		"def_shortdata":  req.Subject,
-		"def_longdata":   req.Message,
-		"conditions":     conditions,
-		"operations":     operations,
-	}
-	if formula != "" {
-		params["formula"] = formula
+		"actionid":   id,
+		"name":       req.Name,
+		"filter":     filter,
+		"status":     status,
+		"esc_period": escPeriod,
+		"operations": operations,
 	}
 	var ignored any
 	return c.callAuth(ctx, "action.update", params, &ignored)
