@@ -283,11 +283,9 @@ func (r *hostResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 	templateNames := make([]string, 0, len(host.ParentTemplates))
 	for _, t := range host.ParentTemplates {
 		templateIDs = append(templateIDs, t.TemplateID)
-		if t.Host != "" {
-			templateNames = append(templateNames, t.Host)
-		} else {
-			templateNames = append(templateNames, t.Name)
-		}
+		// Utiliser le nom technique (host) pour cohérence avec template_names en config
+		// (ex. "Videoprojecteur" plutôt que "Vidéprojecteur").
+		templateNames = append(templateNames, t.Host)
 	}
 	state.TemplateIDs, _ = types.SetValueFrom(ctx, types.StringType, templateIDs)
 	state.TemplateNames, _ = types.SetValueFrom(ctx, types.StringType, templateNames)

@@ -1220,8 +1220,9 @@ func (c *Client) ActionCreate(ctx context.Context, req ActionCreateRequest) (str
 
 func (c *Client) ActionGetByID(ctx context.Context, id string) (*Action, error) {
 	params := map[string]any{
-		"actionids": []string{id},
-		"output":    "extend",
+		"actionids":        []string{id},
+		"output":           "extend",
+		"selectFilter":     "extend",
 		"selectConditions": "extend",
 		"selectOperations": "extend",
 	}

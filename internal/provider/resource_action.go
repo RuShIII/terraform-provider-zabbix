@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"strings"
 
 	"github.com/rushiii/terraform-provider-zabbix/internal/zabbix"
 
@@ -162,8 +163,16 @@ func (r *actionResource) Read(ctx context.Context, req resource.ReadRequest, res
 	}
 
 	state.Name = types.StringValue(action.Name)
-	state.Subject = types.StringValue(action.DefShortData)
-	state.Message = types.StringValue(action.DefLongData)
+	subject := action.DefShortData
+	if subject == "" {
+		subject = "Zabbix: {TRIGGER.STATUS} - {HOST.NAME}: {TRIGGER.NAME}"
+	}
+	state.Subject = types.StringValue(strings.TrimSpace(subject))
+	message := action.DefLongData
+	if message == "" {
+		message = "Trigger: {TRIGGER.NAME}\nHost: {HOST.NAME}\nSeverity: {TRIGGER.SEVERITY}\nStatus: {TRIGGER.STATUS}\nTime: {EVENT.DATE} {EVENT.TIME}\nItem value: {ITEM.VALUE}\n"
+	}
+	state.Message = types.StringValue(normalizeActionMessage(message))
 	state.Enabled = types.BoolValue(action.Status == "0")
 	state.EscPeriod = types.StringValue(action.EscPeriod)
 
@@ -260,4 +269,15 @@ func (r *actionResource) Delete(ctx context.Context, req resource.DeleteRequest,
 
 func (r *actionResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
+}
+
+// normalizeActionMessage rend le message canonique pour éviter la dérive avec le heredoc Terraform :
+// fin de ligne \n, pas d'espaces en fin de lignes, un seul newline final.
+func normalizeActionMessage(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.TrimRight(s, " \t\n\r")
+	if s != "" {
+		s += "\n"
+	}
+	return s
 }
