@@ -45,14 +45,14 @@ func (v *FlexInt) UnmarshalJSON(data []byte) error {
 		if err != nil {
 			return err
 		}
-		*v = flexInt(n)
+		*v = FlexInt(n)
 		return nil
 	}
 	var n int
 	if err := json.Unmarshal(data, &n); err != nil {
 		return err
 	}
-	*v = flexInt(n)
+	*v = FlexInt(n)
 	return nil
 }
 
@@ -246,7 +246,7 @@ type Tag struct {
 
 type SNMPDetails struct {
 	// Zabbix 6.4 returns version as a JSON string ("2"), flexInt handles both string and number.
-	Version   flexInt `json:"version,omitempty"`
+	Version   FlexInt `json:"version,omitempty"`
 	Community string  `json:"community,omitempty"`
 	Security  string  `json:"securityname,omitempty"`
 	AuthProto string  `json:"authprotocol,omitempty"`
@@ -879,7 +879,7 @@ func (c *Client) TriggerGetByID(ctx context.Context, id string) (*Trigger, error
 	params := map[string]any{
 		"triggerids":        []string{id},
 		"output":            []string{"triggerid", "description", "expression", "priority", "status"},
-		"expandExpression":  true, // return last(/Host/key) instead of {itemid} to avoid config drift
+		"expandExpression": true, // return last(/Host/key) instead of {itemid} to avoid config drift
 	}
 	var triggers []Trigger
 	if err := c.callAuth(ctx, "trigger.get", params, &triggers); err != nil {
@@ -915,8 +915,8 @@ type Item struct {
 	HostID    string  `json:"hostid"`
 	Name      string  `json:"name"`
 	Key       string  `json:"key_"`
-	Type      flexInt `json:"type"`
-	ValueType flexInt `json:"value_type"`
+	Type      FlexInt `json:"type"`
+	ValueType FlexInt `json:"value_type"`
 	SNMPOid   string  `json:"snmp_oid"`
 	Units     string  `json:"units"`
 	Delay     string  `json:"delay"`
