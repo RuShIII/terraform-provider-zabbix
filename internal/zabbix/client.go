@@ -1090,3 +1090,400 @@ func boolToStatus(enabled bool) int {
 	return 1
 }
 
+// --- Action (trigger notifications, e.g. send email) ---
+
+// Action object (trigger-based, eventsource=0).
+type Action struct {
+	ActionID     string `json:"actionid"`
+	Name         string `json:"name"`
+	EventSource  string `json:"eventsource"` // "0" = trigger
+	EvalType     string `json:"evaltype"`
+	Status       string `json:"status"` // "0"=enabled, "1"=disabled
+	EscPeriod    string `json:"esc_period"`
+	DefShortData string `json:"def_shortdata"`
+	DefLongData  string `json:"def_longdata"`
+	Conditions   []struct {
+		ConditionType string `json:"conditiontype"`
+		Operator      string `json:"operator"`
+		Value         string `json:"value"`
+	} `json:"conditions"`
+	Operations []struct {
+		OperationType string `json:"operationtype"`
+		OpmessageGrp  []struct {
+			UsrgrpID string `json:"usrgrpid"`
+		} `json:"opmessage_grp,omitempty"`
+		Opmessage *struct {
+			DefaultMsg string `json:"default_msg"`
+		} `json:"opmessage,omitempty"`
+	} `json:"operations"`
+}
+
+// ActionCreateRequest for trigger-based action (send message to user groups).
+type ActionCreateRequest struct {
+	Name              string
+	UserGroupIDs      []string // usrgrpid list
+	Subject           string   // def_shortdata
+	Message           string   // def_longdata
+	Enabled           bool
+	EscPeriod         string   // e.g. "1h", "60s"
+	TriggerNameLike   []string // optional: restrict to triggers whose name contains any of these (conditiontype 2, operator 8 like)
+}
+
+func (c *Client) ActionCreate(ctx context.Context, req ActionCreateRequest) (string, error) {
+	// Condition 1: trigger value = PROBLEM (conditiontype 5, value 1)
+	conditions := []map[string]string{
+		{"conditiontype": "5", "operator": "0", "value": "1"},
+	}
+	evaltype := "1" // AND
+	formula := ""
+	if len(req.TriggerNameLike) > 0 {
+		// Conditions 2, 3, ...: trigger name like "X" (conditiontype 2, operator 8)
+		for _, pat := range req.TriggerNameLike {
+			if pat == "" {
+				continue
+			}
+			conditions = append(conditions, map[string]string{"conditiontype": "2", "operator": "8", "value": pat})
+		}
+		// Formula: 1 and (2 or 3 or ...) so we need PROBLEM and at least one name match
+		if len(conditions) > 1 {
+			evaltype = "0"
+			parts := make([]string, 0, len(conditions)-1)
+			for i := 2; i <= len(conditions); i++ {
+				parts = append(parts, strconv.Itoa(i))
+			}
+			formula = "1 and (" + strings.Join(parts, " or ") + ")"
+		}
+	}
+	opmessageGrp := make([]map[string]string, 0, len(req.UserGroupIDs))
+	for _, gid := range req.UserGroupIDs {
+		opmessageGrp = append(opmessageGrp, map[string]string{"usrgrpid": gid})
+	}
+	// Operation: send message (operationtype 0) to user groups, use default message
+	operations := []map[string]any{
+		{
+			"operationtype":  "0",
+			"opmessage_grp":  opmessageGrp,
+			"opmessage":      map[string]string{"default_msg": "1"},
+		},
+	}
+	status := "1"
+	if req.Enabled {
+		status = "0"
+	}
+	escPeriod := req.EscPeriod
+	if escPeriod == "" {
+		escPeriod = "1h"
+	}
+	params := map[string]any{
+		"name":          req.Name,
+		"eventsource":   "0",
+		"evaltype":      evaltype,
+		"status":        status,
+		"esc_period":    escPeriod,
+		"def_shortdata": req.Subject,
+		"def_longdata":  req.Message,
+		"conditions":    conditions,
+		"operations":    operations,
+	}
+	if formula != "" {
+		params["formula"] = formula
+	}
+	var result struct {
+		ActionIDs []string `json:"actionids"`
+	}
+	if err := c.callAuth(ctx, "action.create", params, &result); err != nil {
+		return "", err
+	}
+	if len(result.ActionIDs) == 0 {
+		return "", errors.New("action.create returned no actionid")
+	}
+	return result.ActionIDs[0], nil
+}
+
+func (c *Client) ActionGetByID(ctx context.Context, id string) (*Action, error) {
+	params := map[string]any{
+		"actionids": []string{id},
+		"output":    "extend",
+		"selectConditions": "extend",
+		"selectOperations": "extend",
+	}
+	var actions []Action
+	if err := c.callAuth(ctx, "action.get", params, &actions); err != nil {
+		return nil, err
+	}
+	if len(actions) == 0 {
+		return nil, ErrNotFound
+	}
+	return &actions[0], nil
+}
+
+func (c *Client) ActionUpdate(ctx context.Context, id string, req ActionCreateRequest) error {
+	conditions := []map[string]string{
+		{"conditiontype": "5", "operator": "0", "value": "1"},
+	}
+	evaltype := "1"
+	formula := ""
+	if len(req.TriggerNameLike) > 0 {
+		for _, pat := range req.TriggerNameLike {
+			if pat == "" {
+				continue
+			}
+			conditions = append(conditions, map[string]string{"conditiontype": "2", "operator": "8", "value": pat})
+		}
+		if len(conditions) > 1 {
+			evaltype = "0"
+			parts := make([]string, 0, len(conditions)-1)
+			for i := 2; i <= len(conditions); i++ {
+				parts = append(parts, strconv.Itoa(i))
+			}
+			formula = "1 and (" + strings.Join(parts, " or ") + ")"
+		}
+	}
+	opmessageGrp := make([]map[string]string, 0, len(req.UserGroupIDs))
+	for _, gid := range req.UserGroupIDs {
+		opmessageGrp = append(opmessageGrp, map[string]string{"usrgrpid": gid})
+	}
+	operations := []map[string]any{
+		{
+			"operationtype": "0",
+			"opmessage_grp": opmessageGrp,
+			"opmessage":     map[string]string{"default_msg": "1"},
+		},
+	}
+	status := "1"
+	if req.Enabled {
+		status = "0"
+	}
+	escPeriod := req.EscPeriod
+	if escPeriod == "" {
+		escPeriod = "1h"
+	}
+	params := map[string]any{
+		"actionid":       id,
+		"name":           req.Name,
+		"evaltype":       evaltype,
+		"status":         status,
+		"esc_period":     escPeriod,
+		"def_shortdata":  req.Subject,
+		"def_longdata":   req.Message,
+		"conditions":     conditions,
+		"operations":     operations,
+	}
+	if formula != "" {
+		params["formula"] = formula
+	}
+	var ignored any
+	return c.callAuth(ctx, "action.update", params, &ignored)
+}
+
+func (c *Client) ActionDelete(ctx context.Context, id string) error {
+	var ignored any
+	return c.callAuth(ctx, "action.delete", []string{id}, &ignored)
+}
+
+// --- User group (for action recipients) ---
+
+type UserGroup struct {
+	UsrgrpID string `json:"usrgrpid"`
+	Name     string `json:"name"`
+}
+
+func (c *Client) UserGroupGetByID(ctx context.Context, id string) (*UserGroup, error) {
+	params := map[string]any{
+		"usrgrpids": []string{id},
+		"output":    []string{"usrgrpid", "name"},
+	}
+	var groups []UserGroup
+	if err := c.callAuth(ctx, "usergroup.get", params, &groups); err != nil {
+		return nil, err
+	}
+	if len(groups) == 0 {
+		return nil, ErrNotFound
+	}
+	return &groups[0], nil
+}
+
+// UserGroupIDsByNames returns usergroup IDs for the given names (e.g. "Zabbix administrators").
+func (c *Client) UserGroupIDsByNames(ctx context.Context, names []string) ([]string, error) {
+	out := make([]string, 0, len(names))
+	for _, name := range names {
+		params := map[string]any{
+			"output": []string{"usrgrpid", "name"},
+			"filter": map[string]any{"name": []string{name}},
+		}
+		var groups []UserGroup
+		if err := c.callAuth(ctx, "usergroup.get", params, &groups); err != nil {
+			return nil, err
+		}
+		if len(groups) == 0 {
+			return nil, fmt.Errorf("user group not found: %s", name)
+		}
+		if len(groups) > 1 {
+			return nil, fmt.Errorf("ambiguous user group: %s", name)
+		}
+		out = append(out, groups[0].UsrgrpID)
+	}
+	return out, nil
+}
+
+func (c *Client) UserGroupCreate(ctx context.Context, name string) (string, error) {
+	params := map[string]any{"name": name}
+	var result struct {
+		UsrgrpIDs []string `json:"usrgrpids"`
+	}
+	if err := c.callAuth(ctx, "usergroup.create", params, &result); err != nil {
+		return "", err
+	}
+	if len(result.UsrgrpIDs) == 0 {
+		return "", errors.New("usergroup.create returned no usrgrpid")
+	}
+	return result.UsrgrpIDs[0], nil
+}
+
+func (c *Client) UserGroupUpdate(ctx context.Context, id, name string) error {
+	var ignored any
+	return c.callAuth(ctx, "usergroup.update", map[string]any{"usrgrpid": id, "name": name}, &ignored)
+}
+
+func (c *Client) UserGroupDelete(ctx context.Context, id string) error {
+	var ignored any
+	return c.callAuth(ctx, "usergroup.delete", []string{id}, &ignored)
+}
+
+// UserCreateRequest for creating a Zabbix user (e.g. for notifications).
+type UserCreateRequest struct {
+	Username   string
+	Name       string // display name
+	Password   string
+	UserGrpIDs []string // must contain at least one group
+	RoleID     string   // "1"=User, "2"=Admin, "3"=Super admin
+	Email      string   // if set, add Email media (mediatypeid 1) with this sendto
+}
+
+func (c *Client) UserCreate(ctx context.Context, req UserCreateRequest) (string, error) {
+	usrgrps := make([]map[string]string, 0, len(req.UserGrpIDs))
+	for _, gid := range req.UserGrpIDs {
+		usrgrps = append(usrgrps, map[string]string{"usrgrpid": gid})
+	}
+	params := map[string]any{
+		"username": req.Username,
+		"name":     req.Name,
+		"usrgrps":  usrgrps,
+		"roleid":   req.RoleID,
+	}
+	if req.RoleID == "" {
+		params["roleid"] = "1"
+	}
+	if req.Password != "" {
+		params["passwd"] = req.Password
+	}
+	if req.Email != "" {
+		params["medias"] = []map[string]any{
+			{
+				"mediatypeid": "1",
+				"sendto":      []string{req.Email},
+				"active":      0,
+				"severity":    63,
+				"period":      "1-7,00:00-24:00",
+			},
+		}
+	}
+	var result struct {
+		UserIDs []string `json:"userids"`
+	}
+	if err := c.callAuth(ctx, "user.create", params, &result); err != nil {
+		return "", err
+	}
+	if len(result.UserIDs) == 0 {
+		return "", errors.New("user.create returned no userid")
+	}
+	return result.UserIDs[0], nil
+}
+
+func (c *Client) UserGetByID(ctx context.Context, id string) (*User, error) {
+	params := map[string]any{
+		"userids":        []string{id},
+		"output":         "extend",
+		"selectMedias":   "extend",
+		"selectUsrgrps":  "extend",
+	}
+	var users []User
+	if err := c.callAuth(ctx, "user.get", params, &users); err != nil {
+		return nil, err
+	}
+	if len(users) == 0 {
+		return nil, ErrNotFound
+	}
+	return &users[0], nil
+}
+
+type sendToString string
+
+func (s *sendToString) UnmarshalJSON(data []byte) error {
+	var arr []string
+	if err := json.Unmarshal(data, &arr); err == nil {
+		if len(arr) > 0 {
+			*s = sendToString(arr[0])
+		}
+		return nil
+	}
+	var str string
+	if err := json.Unmarshal(data, &str); err != nil {
+		return err
+	}
+	*s = sendToString(str)
+	return nil
+}
+
+type User struct {
+	UserID   string `json:"userid"`
+	Username string `json:"username"`
+	Name     string `json:"name"`
+	RoleID   string `json:"roleid"`
+	Medias   []struct {
+		MediaTypeID string       `json:"mediatypeid"`
+		SendTo      sendToString `json:"sendto"`
+	} `json:"medias,omitempty"`
+	Usrgrps []struct {
+		UsrgrpID string `json:"usrgrpid"`
+	} `json:"usrgrps,omitempty"`
+}
+
+func (c *Client) UserUpdate(ctx context.Context, userID string, req UserCreateRequest) error {
+	usrgrps := make([]map[string]string, 0, len(req.UserGrpIDs))
+	for _, gid := range req.UserGrpIDs {
+		usrgrps = append(usrgrps, map[string]string{"usrgrpid": gid})
+	}
+	params := map[string]any{
+		"userid":   userID,
+		"username": req.Username,
+		"name":     req.Name,
+		"usrgrps":  usrgrps,
+		"roleid":   req.RoleID,
+	}
+	if req.RoleID == "" {
+		params["roleid"] = "1"
+	}
+	if req.Password != "" {
+		params["passwd"] = req.Password
+	}
+	if req.Email != "" {
+		params["medias"] = []map[string]any{
+			{
+				"mediatypeid": "1",
+				"sendto":      []string{req.Email},
+				"active":      0,
+				"severity":    63,
+				"period":      "1-7,00:00-24:00",
+			},
+		}
+	}
+	var ignored any
+	return c.callAuth(ctx, "user.update", params, &ignored)
+}
+
+func (c *Client) UserDelete(ctx context.Context, id string) error {
+	var ignored any
+	return c.callAuth(ctx, "user.delete", []string{id}, &ignored)
+}
+

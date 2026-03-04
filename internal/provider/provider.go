@@ -168,7 +168,9 @@ func buildAuth(cfg providerModel) (zabbix.Auth, diag.Diagnostics) {
 }
 
 func (p *zabbixProvider) DataSources(_ context.Context) []func() datasource.DataSource {
-	return nil
+	return []func() datasource.DataSource{
+		NewUserGroupDataSource,
+	}
 }
 
 func (p *zabbixProvider) Resources(_ context.Context) []func() resource.Resource {
@@ -178,5 +180,8 @@ func (p *zabbixProvider) Resources(_ context.Context) []func() resource.Resource
 		NewTemplateResource,
 		NewTriggerResource,
 		NewItemResource,
+		NewActionResource,
+		NewUserGroupResource,
+		NewUserResource,
 	}
 }
